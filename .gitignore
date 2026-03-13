@@ -1,0 +1,76 @@
+# Prerequisites
+*.d
+*.obj
+*.o
+*.inc
+*.swp
+*.swo
+*.log
+*.tlog
+*.idb
+*.pdb
+
+# Build Directories
+build/
+build_*/
+bin/
+lib/
+out/
+_deps/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+Makefile
+cmake_install.cmake
+install_manifest.txt
+Testing/
+*.cmake
+!CMakeLists.txt
+!*/CMakeLists.txt
+
+# Visual Studio
+.vs/
+*.sln
+*.vcxproj
+*.vcxproj.user
+*.vcxproj.filters
+*.suo
+*.ntvs
+*.njsproj
+*.fnt
+*.user
+
+# VS Code
+.vscode/
+*.code-workspace
+.history/
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Executables & Libraries
+*.exe
+*.dll
+*.so
+*.dylib
+*.lib
+*.a
+*.exp
+*.ilk
+
+# Project Specific
+config.json
+*.json
+!package.json
+!vcpkg.json
