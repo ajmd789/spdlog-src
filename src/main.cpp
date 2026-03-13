@@ -6,11 +6,16 @@
 #include <iomanip>
 #include <mutex>
 #include <future>
+#include <clocale>
 
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <CLI/CLI.hpp>
 #include <asio.hpp>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #include "ZSend/config/ConfigManager.hpp"
 #include "ZSend/utils/NicknameGenerator.hpp"
@@ -30,9 +35,16 @@ void SetupLogging() {
     spdlog::set_pattern("[%H:%M:%S] [%^%l%$] %v");
 }
 
-void RunInteractive(Network::Discovery& discovery, Network::Sender& sender, Network::Receiver& receiver);
+void RunInteractive(Network::Discovery& /*discovery*/, Network::Sender& sender, Network::Receiver& receiver);
 
 int main(int argc, char** argv) {
+    // Enable UTF-8 console output on Windows
+#ifdef _WIN32
+    SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
+    std::setlocale(LC_ALL, ".UTF8");
+#endif
+
     SetupLogging();
 
     // 1. Load Config

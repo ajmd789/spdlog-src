@@ -1,6 +1,11 @@
 @echo off
-if not exist build mkdir build
-cd build
-cmake -G "MinGW Makefiles" .. -DCMAKE_BUILD_TYPE=Release
-cmake --build .
-cd ..
+setlocal
+set "SCRIPT_DIR=%~dp0"
+for %%I in ("%SCRIPT_DIR%..") do set "ROOT_DIR=%%~fI"
+set "BUILD_DIR=%ROOT_DIR%\build"
+if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%"
+for /D %%D in ("%BUILD_DIR%\_deps\*-subbuild") do (
+    if exist "%%D\CMakeCache.txt" del /Q "%%D\CMakeCache.txt"
+)
+cmake -S "%ROOT_DIR%" -B "%BUILD_DIR%" -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release
+cmake --build "%BUILD_DIR%"

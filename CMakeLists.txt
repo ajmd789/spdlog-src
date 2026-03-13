@@ -1,4 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
+if(POLICY CMP0135)
+    cmake_policy(SET CMP0135 NEW)
+endif()
 
 project(ZSend 
     VERSION 0.1.0 
@@ -16,9 +19,13 @@ option(BUILD_TESTING "Build tests" ON)
 
 # Compiler warnings
 if(MSVC)
-    add_compile_options(/W4)
+    add_compile_options(/W4 /utf-8)
 else()
     add_compile_options(-Wall -Wextra)
+    if(WIN32)
+        # Force GCC/MinGW to use UTF-8 for both source and execution
+        add_compile_options(-finput-charset=UTF-8 -fexec-charset=UTF-8)
+    endif()
 endif()
 
 # ASan support
