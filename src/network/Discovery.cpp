@@ -27,6 +27,7 @@ Discovery::~Discovery() {
 void Discovery::Start() {
     if (running_) return;
     running_ = true;
+    spdlog::info("Discovery started (udp:{})", port_);
     StartReceive();
     BroadcastPresence();
 }
@@ -100,6 +101,7 @@ void Discovery::HandleReceive(const std::error_code& error, std::size_t bytes_tr
     if (!error) {
         try {
             std::string data(recv_buffer_.data(), bytes_transferred);
+            spdlog::info("UDP recv {}:{} {}", sender_endpoint_.address().to_string(), sender_endpoint_.port(), data);
             auto j = nlohmann::json::parse(data);
             
             // 协议基础校验：必须是 ZSend 的发现报文。
@@ -146,11 +148,12 @@ void Discovery::BroadcastPresence() {
     auto data = j.dump();
     // 广播到当前配置端口（当前项目默认 8888）。
     auto endpoint = asio::ip::udp::endpoint(asio::ip::address_v4::broadcast(), port_);
+    spdlog::info("UDP send {}:{} {}", endpoint.address().to_string(), endpoint.port(), data);
 
     socket_.async_send_to(
         asio::buffer(data), endpoint,
-        [this](const std::error_code& error, std::size_t) {
-            HandleBroadcast(error);
+        [this, endpoint, data](const std::error_code& error, std::size_t bytes_transferred) {
+            HandleBroadcast(error, bytes_transferred, endpoint, data);
         });
 
     broadcast_timer_.expires_after(std::chrono::seconds(2));
@@ -160,10 +163,15 @@ void Discovery::BroadcastPresence() {
 }
 
 // 广播发送回调：记录异常，便于排查网络或防火墙问题。
-void Discovery::HandleBroadcast(const std::error_code& error) {
+void Discovery::HandleBroadcast(const std::error_code& error,
+                                std::size_t bytes_transferred,
+                                const asio::ip::udp::endpoint& endpoint,
+                                const std::string& data) {
     if (error && error != asio::error::operation_aborted) {
-        spdlog::warn("Broadcast failed: {}", error.message());
+        spdlog::warn("Broadcast failed {}:{} {} {}", endpoint.address().to_string(), endpoint.port(), error.message(), data);
+        return;
     }
+    spdlog::info("Broadcast ok {}:{} {} {}", endpoint.address().to_string(), endpoint.port(), bytes_transferred, data);
 }
 
 } // namespace Network

@@ -34,7 +34,10 @@ private:
     void StartReceive();
     void HandleReceive(const std::error_code& error, std::size_t bytes_transferred);
     void BroadcastPresence();
-    void HandleBroadcast(const std::error_code& error);
+    void HandleBroadcast(const std::error_code& error,
+                         std::size_t bytes_transferred,
+                         const asio::ip::udp::endpoint& endpoint,
+                         const std::string& data);
 
     asio::io_context& ioc_;
     asio::ip::udp::socket socket_;
