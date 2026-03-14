@@ -28,6 +28,7 @@ using namespace ZSend;
 Config::AppConfig g_config;
 std::vector<Network::Peer> g_peers;
 std::mutex g_peers_mutex;
+constexpr uint16_t kServicePort = 53317;
 
 void SetupLogging() {
     auto console = spdlog::stdout_color_mt("console");
@@ -55,21 +56,26 @@ int main(int argc, char** argv) {
     asio::io_context ioc;
     
     // 3. Components
-    // Discovery runs on UDP port 8888
-    Network::Discovery discovery(ioc, 8888, g_config);
+    // Discovery runs on UDP port 53317
+    Network::Discovery discovery(ioc, kServicePort, g_config);
     
-    // Sender/Receiver (Receiver listens on TCP port 8888)
+    // Sender/Receiver (Receiver listens on TCP port 53317)
     Network::Sender sender(ioc);
-    Network::Receiver receiver(ioc, 8888, g_config.download_dir);
+    Network::Receiver receiver(ioc, kServicePort, g_config.download_dir);
 
     // 4. Peer Discovery Callback
     discovery.SetOnPeerFound([](const Network::Peer& peer) {
         std::lock_guard<std::mutex> lock(g_peers_mutex);
         bool found = false;
         for (auto& p : g_peers) {
-            if (p.ip == peer.ip) {
+            bool same_uuid = !p.uuid.empty() && !peer.uuid.empty() && p.uuid == peer.uuid;
+            bool same_ip = p.ip == peer.ip;
+            if (same_uuid || same_ip) {
                 p.last_seen = peer.last_seen;
                 p.nickname = peer.nickname;
+                p.ip = peer.ip;
+                p.port = peer.port;
+                p.uuid = peer.uuid;
                 found = true;
                 break;
             }
@@ -104,7 +110,7 @@ int main(int argc, char** argv) {
         std::promise<bool> done;
         auto future = done.get_future();
         
-        sender.Connect(target_ip, 8888, [&](bool success) {
+        sender.Connect(target_ip, kServicePort, [&](bool success) {
             if (success) {
                 sender.SendFile(filepath, 
                     [](uint64_t s, uint64_t t, double speed) {
@@ -198,6 +204,12 @@ void RunInteractive(Network::Discovery& /*discovery*/, Network::Sender& sender, 
                 std::lock_guard<std::mutex> lock(g_peers_mutex);
                 current_peers = g_peers;
             }
+
+            if (current_peers.empty()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(2200));
+                std::lock_guard<std::mutex> lock(g_peers_mutex);
+                current_peers = g_peers;
+            }
             
             if (current_peers.empty()) {
                 std::cout << "No peers found. Enter IP manually: ";
@@ -205,7 +217,7 @@ void RunInteractive(Network::Discovery& /*discovery*/, Network::Sender& sender, 
                 std::cin >> ip;
                 
                 std::atomic<bool> done{false};
-                sender.Connect(ip, 8888, [&](bool success) {
+                sender.Connect(ip, kServicePort, [&](bool success) {
                     if (success) {
                         sender.SendFile(path, 
                             [](uint64_t s, uint64_t t, double speed) {
@@ -241,7 +253,7 @@ void RunInteractive(Network::Discovery& /*discovery*/, Network::Sender& sender, 
                 }
                 
                 std::atomic<bool> done{false};
-                sender.Connect(target_ip, 8888, [&](bool success) {
+                sender.Connect(target_ip, kServicePort, [&](bool success) {
                     if (success) {
                         sender.SendFile(path, 
                             [](uint64_t s, uint64_t t, double speed) {

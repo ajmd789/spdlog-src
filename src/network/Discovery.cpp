@@ -53,6 +53,13 @@ bool Discovery::IsSelfIp(const std::string& ip) const {
     return local_ips_.find(ip) != local_ips_.end();
 }
 
+bool Discovery::IsSelfPeer(const Peer& peer) const {
+    if (!config_.device_id.empty() && !peer.uuid.empty() && peer.uuid == config_.device_id) {
+        return true;
+    }
+    return IsSelfIp(peer.ip);
+}
+
 // 收集本机 IPv4 地址集合：
 // - 包含回环地址 127.0.0.1；
 // - 通过主机名解析补充本机网卡地址；
@@ -115,7 +122,7 @@ void Discovery::HandleReceive(const std::error_code& error, std::size_t bytes_tr
                     std::chrono::system_clock::now().time_since_epoch()).count();
 
                 // 过滤本机广播，避免“搜索到自己”。
-                if (IsSelfIp(peer.ip)) {
+                if (IsSelfPeer(peer)) {
                     StartReceive();
                     return;
                 }
@@ -144,9 +151,10 @@ void Discovery::BroadcastPresence() {
     j["magic"] = "ZSEND_DISCOVERY";
     j["nickname"] = config_.nickname;
     j["port"] = port_;
+    j["uuid"] = config_.device_id;
 
     auto data = j.dump();
-    // 广播到当前配置端口（当前项目默认 8888）。
+    // 广播到当前配置端口（当前项目默认 53317）。
     auto endpoint = asio::ip::udp::endpoint(asio::ip::address_v4::broadcast(), port_);
     spdlog::info("UDP send {}:{} {}", endpoint.address().to_string(), endpoint.port(), data);
 

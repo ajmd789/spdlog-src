@@ -7,6 +7,7 @@ namespace Config {
 struct AppConfig {
     std::string nickname;
     std::string download_dir;
+    std::string device_id;
 };
 
 class ConfigManager {
