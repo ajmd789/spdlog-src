@@ -1,20 +1,28 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include <array>
 #include <thread>
 #include <atomic>
 #include <iomanip>
 #include <mutex>
 #include <future>
 #include <clocale>
+#include <filesystem>
 
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
+#include <spdlog/sinks/rotating_file_sink.h>
 #include <CLI/CLI.hpp>
 #include <asio.hpp>
 
 #ifdef _WIN32
 #include <windows.h>
+#elif defined(__APPLE__)
+#include <mach-o/dyld.h>
+#else
+#include <limits.h>
+#include <unistd.h>
 #endif
 
 #include "ZSend/config/ConfigManager.hpp"
@@ -29,10 +37,80 @@ Config::AppConfig g_config;
 std::vector<Network::Peer> g_peers;
 std::mutex g_peers_mutex;
 
+namespace {
+std::filesystem::path GetExecutablePath() {
+#ifdef _WIN32
+    std::wstring buffer(MAX_PATH, L'\0');
+    DWORD size = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+    if (size == 0) return {};
+
+    while (size == buffer.size()) {
+        buffer.resize(buffer.size() * 2);
+        size = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+        if (size == 0) return {};
+    }
+
+    buffer.resize(size);
+    return std::filesystem::path(buffer);
+#elif defined(__APPLE__)
+    std::vector<char> buffer(1024);
+    uint32_t size = static_cast<uint32_t>(buffer.size());
+    if (_NSGetExecutablePath(buffer.data(), &size) != 0) {
+        buffer.resize(size);
+        if (_NSGetExecutablePath(buffer.data(), &size) != 0) return {};
+    }
+
+    std::error_code ec;
+    auto canonical = std::filesystem::weakly_canonical(std::filesystem::path(buffer.data()), ec);
+    return ec ? std::filesystem::path(buffer.data()) : canonical;
+#else
+    std::array<char, PATH_MAX> buffer{};
+    const auto len = ::readlink("/proc/self/exe", buffer.data(), buffer.size() - 1);
+    if (len <= 0) return {};
+    buffer[static_cast<size_t>(len)] = '\0';
+    return std::filesystem::path(buffer.data());
+#endif
+}
+
+std::filesystem::path GetExecutableDir() {
+    auto exe_path = GetExecutablePath();
+    if (exe_path.empty()) return std::filesystem::current_path();
+
+    auto exe_dir = exe_path.parent_path();
+    return exe_dir.empty() ? std::filesystem::current_path() : exe_dir;
+}
+} // namespace
+
 void SetupLogging() {
-    auto console = spdlog::stdout_color_mt("console");
-    spdlog::set_default_logger(console);
-    spdlog::set_pattern("[%H:%M:%S] [%^%l%$] %v");
+    auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+    console_sink->set_level(spdlog::level::info);
+    console_sink->set_pattern("[%H:%M:%S] [%^%l%$] %v");
+
+    std::vector<spdlog::sink_ptr> sinks{console_sink};
+
+    auto log_dir = GetExecutableDir() / "log";
+    std::error_code ec;
+    std::filesystem::create_directories(log_dir, ec);
+    if (ec) {
+        std::cerr << "Failed to create log directory '" << log_dir.u8string() << "': " << ec.message() << "\n";
+    } else {
+        try {
+            const auto log_file = (log_dir / "zsend.log").u8string();
+            auto file_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(log_file, 5 * 1024 * 1024, 3);
+            file_sink->set_level(spdlog::level::debug);
+            file_sink->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%l] [%t] %v");
+            sinks.push_back(file_sink);
+        } catch (const std::exception& e) {
+            std::cerr << "Failed to create log file sink: " << e.what() << "\n";
+        }
+    }
+
+    auto logger = std::make_shared<spdlog::logger>("zsend", sinks.begin(), sinks.end());
+    spdlog::set_default_logger(logger);
+    spdlog::set_level(spdlog::level::debug);
+    spdlog::flush_on(spdlog::level::info);
+
+    spdlog::info("Log directory: {}", log_dir.u8string());
 }
 
 void RunInteractive(Network::Discovery& /*discovery*/, Network::Sender& sender, Network::Receiver& receiver);
@@ -50,6 +128,7 @@ int main(int argc, char** argv) {
     // 1. Load Config
     g_config = Config::ConfigManager::Load();
     spdlog::info("Welcome, {}!", g_config.nickname);
+    spdlog::info("Download dir: {}", g_config.download_dir);
 
     // 2. Setup Network Context
     asio::io_context ioc;
@@ -64,19 +143,24 @@ int main(int argc, char** argv) {
 
     // 4. Peer Discovery Callback
     discovery.SetOnPeerFound([](const Network::Peer& peer) {
-        std::lock_guard<std::mutex> lock(g_peers_mutex);
-        bool found = false;
-        for (auto& p : g_peers) {
-            if (p.ip == peer.ip) {
-                p.last_seen = peer.last_seen;
-                p.nickname = peer.nickname;
-                found = true;
-                break;
+        bool is_new = false;
+        {
+            std::lock_guard<std::mutex> lock(g_peers_mutex);
+            bool found = false;
+            for (auto& p : g_peers) {
+                if (p.ip == peer.ip) {
+                    p.last_seen = peer.last_seen;
+                    p.nickname = peer.nickname;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                g_peers.push_back(peer);
+                is_new = true;
             }
         }
-        if (!found) {
-            g_peers.push_back(peer);
-        }
+        if (is_new) spdlog::info("Peer discovered: {} ({})", peer.nickname, peer.ip);
     });
 
     // 5. Start Background Thread

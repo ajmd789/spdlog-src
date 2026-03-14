@@ -142,7 +142,7 @@ target_link_libraries(zsend PRIVATE
 
 # Link ws2_32 on Windows for asio
 if(WIN32)
-    target_link_libraries(zsend PRIVATE ws2_32 mswsock)
+    target_link_libraries(zsend PRIVATE ws2_32 mswsock iphlpapi)
 endif()
 
 if(ENABLE_GRPC)
@@ -173,7 +173,7 @@ if(BUILD_TESTING)
         asio::asio
     )
     if(WIN32)
-        target_link_libraries(zsend_tests PRIVATE ws2_32 mswsock)
+        target_link_libraries(zsend_tests PRIVATE ws2_32 mswsock iphlpapi)
     endif()
     add_test(NAME unit_tests COMMAND zsend_tests)
 endif()

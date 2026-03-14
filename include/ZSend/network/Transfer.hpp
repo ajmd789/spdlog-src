@@ -1,6 +1,7 @@
 #pragma once
 #include <string>
 #include <functional>
+#include <atomic>
 #include <asio.hpp>
 #include "ZSend/network/Protocol.hpp"
 
@@ -25,7 +26,7 @@ public:
 
 private:
     asio::ip::tcp::socket socket_;
-    bool connected_ = false;
+    std::atomic<bool> connected_{false};
     // ... impl details
 };
 

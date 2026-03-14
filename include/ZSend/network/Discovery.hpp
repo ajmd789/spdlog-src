@@ -2,6 +2,7 @@
 #include <string>
 #include <functional>
 #include <unordered_set>
+#include <vector>
 #include <asio.hpp>
 #include <array>
 #include "ZSend/config/ConfigManager.hpp"
@@ -29,8 +30,10 @@ public:
     void SetOnPeerFound(PeerFoundCallback cb);
 
 private:
+    void CollectLocalNetworkInfo();
+    void ConfigureSocket();
+    void JoinMulticastGroups();
     bool IsSelfIp(const std::string& ip) const;
-    std::unordered_set<std::string> CollectLocalIps() const;
     void StartReceive();
     void HandleReceive(const std::error_code& error, std::size_t bytes_transferred);
     void BroadcastPresence();
@@ -43,6 +46,9 @@ private:
     asio::steady_timer broadcast_timer_;
     Config::AppConfig config_;
     std::unordered_set<std::string> local_ips_;
+    std::vector<asio::ip::address_v4> interface_addrs_v4_;
+    std::vector<asio::ip::address_v4> broadcast_addrs_v4_;
+    asio::ip::address_v4 multicast_group_;
     PeerFoundCallback on_peer_found_;
     bool running_;
     int port_;

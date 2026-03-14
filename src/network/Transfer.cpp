@@ -17,12 +17,15 @@ void Sender::Connect(const std::string& ip, int port, std::function<void(bool su
     // Run in a thread to avoid blocking if called from main
     std::thread([this, ip, port, cb]() {
         try {
+            spdlog::info("Connecting to {}:{} ...", ip, port);
             asio::ip::tcp::endpoint endpoint(asio::ip::make_address(ip), port);
             socket_.connect(endpoint);
-            connected_ = true;
+            connected_.store(true, std::memory_order_relaxed);
+            spdlog::info("Connected to {}:{}", ip, port);
             if (cb) cb(true);
         } catch (const std::exception& e) {
-            spdlog::error("Connect failed: {}", e.what());
+            connected_.store(false, std::memory_order_relaxed);
+            spdlog::error("Connect to {}:{} failed: {}", ip, port, e.what());
             if (cb) cb(false);
         }
     }).detach();
@@ -30,7 +33,7 @@ void Sender::Connect(const std::string& ip, int port, std::function<void(bool su
 
 void Sender::SendFile(const std::string& filepath, ProgressCallback progress_cb, std::function<void(bool success)> done_cb) {
     std::thread([this, filepath, progress_cb, done_cb]() {
-        if (!connected_) {
+        if (!connected_.load(std::memory_order_relaxed)) {
             spdlog::error("Not connected");
             if (done_cb) done_cb(false);
             return;
@@ -48,6 +51,7 @@ void Sender::SendFile(const std::string& filepath, ProgressCallback progress_cb,
             file.seekg(0, std::ios::beg);
             
             std::string filename = std::filesystem::path(filepath).filename().string();
+            spdlog::info("Sending '{}' ({} bytes)", filename, filesize);
 
             // 1. Handshake
             nlohmann::json handshake;
@@ -69,7 +73,7 @@ void Sender::SendFile(const std::string& filepath, ProgressCallback progress_cb,
             Protocol::Header resp_header;
             asio::read(socket_, asio::buffer(&resp_header, sizeof(resp_header)));
             if (resp_header.type != (uint16_t)Protocol::PacketType::Accept) {
-                spdlog::warn("Transfer rejected");
+                spdlog::warn("Transfer rejected by receiver");
                 if (done_cb) done_cb(false);
                 return;
             }
@@ -132,12 +136,27 @@ void Receiver::Start(RequestCallback request_cb, ProgressCallback progress_cb, s
     request_cb_ = request_cb;
     progress_cb_ = progress_cb;
     done_cb_ = done_cb;
+
+    std::error_code ec;
+    auto ep = acceptor_.local_endpoint(ec);
+    if (!ec) {
+        spdlog::info("Receiver listening on {}:{} (save_dir='{}')", ep.address().to_string(), ep.port(), save_dir_);
+    } else {
+        spdlog::info("Receiver listening (save_dir='{}')", save_dir_);
+    }
+
     DoAccept();
 }
 
 void Receiver::DoAccept() {
     acceptor_.async_accept(socket_, [this](const std::error_code& error) {
         if (!error) {
+            std::error_code ec;
+            auto remote = socket_.remote_endpoint(ec);
+            if (!ec) {
+                spdlog::info("Incoming connection from {}:{}", remote.address().to_string(), remote.port());
+            }
+
             // Move socket to thread for blocking handling
             // Note: socket_ is a member, so we can't move it easily if we want to accept more?
             // For MVP one transfer at a time is fine.
@@ -152,6 +171,13 @@ void Receiver::DoAccept() {
 
 void Receiver::HandleSession() {
     try {
+        std::string sender = "Unknown";
+        {
+            std::error_code ec;
+            auto remote = socket_.remote_endpoint(ec);
+            if (!ec) sender = remote.address().to_string();
+        }
+
         // 1. Read Handshake
         Protocol::Header header;
         asio::read(socket_, asio::buffer(&header, sizeof(header)));
@@ -165,14 +191,22 @@ void Receiver::HandleSession() {
         auto j = nlohmann::json::parse(body);
         std::string filename = j["filename"];
         uint64_t filesize = j["filesize"];
+        const auto safe_name = std::filesystem::path(filename).filename().string();
+        if (safe_name != filename) {
+            spdlog::warn("Sanitized filename '{}' -> '{}'", filename, safe_name);
+            filename = safe_name;
+        }
+
+        spdlog::info("Incoming file '{}' ({} bytes) from {}", filename, filesize, sender);
         
         // Callback to user
         bool accepted = true;
         if (request_cb_) {
-            accepted = request_cb_(filename, filesize, "Unknown");
+            accepted = request_cb_(filename, filesize, sender);
         }
 
         if (!accepted) {
+            spdlog::info("Transfer rejected for '{}' from {}", filename, sender);
             Protocol::Header resp;
             resp.magic = Protocol::MAGIC;
             resp.version = Protocol::VERSION;
@@ -192,14 +226,21 @@ void Receiver::HandleSession() {
         resp.body_len = 0;
         resp.checksum = 0;
         asio::write(socket_, asio::buffer(&resp, sizeof(resp)));
+        spdlog::debug("Accepted '{}' from {}", filename, sender);
 
         // 2. Read Data Header
         asio::read(socket_, asio::buffer(&header, sizeof(header)));
         if (header.type != (uint16_t)Protocol::PacketType::Data) throw std::runtime_error("Expected Data");
         
         // 3. Stream to File
+        std::error_code ec;
+        std::filesystem::create_directories(save_dir_, ec);
+        if (ec) spdlog::warn("Failed to create save_dir '{}': {}", save_dir_, ec.message());
+
         std::filesystem::path path = std::filesystem::path(save_dir_) / filename;
         std::ofstream file(path, std::ios::binary);
+        if (!file) throw std::runtime_error("Cannot open output file");
+        spdlog::info("Saving to '{}'", path.string());
         
         std::vector<char> buffer(64 * 1024);
         uint64_t received = 0;
@@ -226,6 +267,7 @@ void Receiver::HandleSession() {
         // 4. Send Ack
         resp.type = (uint16_t)Protocol::PacketType::Ack;
         asio::write(socket_, asio::buffer(&resp, sizeof(resp)));
+        spdlog::info("Received '{}' ({} bytes) from {}", filename, received, sender);
         
         if (done_cb_) done_cb_(true);
 
