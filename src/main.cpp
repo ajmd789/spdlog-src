@@ -10,6 +10,8 @@
 #include <filesystem>
 #include <memory>
 #include <cstdlib>
+#include <limits>
+#include <cctype>
 
 #include <spdlog/spdlog.h>
 #include <spdlog/logger.h>
@@ -32,6 +34,50 @@ using namespace ZSend;
 Config::AppConfig g_config;
 std::vector<Network::Peer> g_peers;
 std::mutex g_peers_mutex;
+
+namespace {
+std::string Trim(const std::string& value) {
+    size_t start = 0;
+    while (start < value.size() && std::isspace(static_cast<unsigned char>(value[start]))) {
+        ++start;
+    }
+    size_t end = value.size();
+    while (end > start && std::isspace(static_cast<unsigned char>(value[end - 1]))) {
+        --end;
+    }
+    return value.substr(start, end - start);
+}
+
+std::string NormalizePathInput(const std::string& raw) {
+    auto trimmed = Trim(raw);
+    if (trimmed.size() >= 2) {
+        const bool wrapped_by_double_quote = trimmed.front() == '"' && trimmed.back() == '"';
+        const bool wrapped_by_single_quote = trimmed.front() == '\'' && trimmed.back() == '\'';
+        if (wrapped_by_double_quote || wrapped_by_single_quote) {
+            return trimmed.substr(1, trimmed.size() - 2);
+        }
+    }
+    return trimmed;
+}
+
+bool TryParseIntStrict(const std::string& raw, int& value) {
+    const auto input = Trim(raw);
+    if (input.empty()) {
+        return false;
+    }
+    size_t consumed = 0;
+    try {
+        const int parsed = std::stoi(input, &consumed, 10);
+        if (consumed != input.size()) {
+            return false;
+        }
+        value = parsed;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+}
 
 void SetupLogging() {
     std::filesystem::create_directories("log");
@@ -237,13 +283,23 @@ void RunInteractive(Network::Discovery& /*discovery*/, Network::Sender& sender, 
             std::cin.ignore(1000, '\n');
             continue;
         }
+        std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
 
         if (choice == 0) break;
         
         if (choice == 1) { // Send
             std::string path;
             std::cout << "Enter file path: ";
-            std::cin >> path;
+            if (!std::getline(std::cin, path)) {
+                std::cin.clear();
+                continue;
+            }
+            path = NormalizePathInput(path);
+            if (path.empty()) {
+                std::cout << "Invalid file path.\n";
+                continue;
+            }
+            SPDLOG_INFO("[UI_INPUT] send_path={}", path);
             
             std::vector<Network::Peer> current_peers;
             while (true) {
@@ -265,10 +321,21 @@ void RunInteractive(Network::Discovery& /*discovery*/, Network::Sender& sender, 
                 std::cout << (i + 1) << ". " << current_peers[i].nickname << " (" << current_peers[i].ip << ")\n";
             }
             
-            int p_idx;
-            std::cin >> p_idx;
+            std::cout << "Enter peer index: ";
+            std::string peer_input;
+            if (!std::getline(std::cin, peer_input)) {
+                std::cin.clear();
+                continue;
+            }
+            int p_idx = 0;
+            if (!TryParseIntStrict(peer_input, p_idx)) {
+                std::cout << "Invalid peer index.\n";
+                SPDLOG_WARN("[UI_INPUT] invalid_peer_index raw={}", peer_input);
+                continue;
+            }
             if (p_idx <= 0 || p_idx > (int)current_peers.size()) {
                 std::cout << "Invalid peer index.\n";
+                SPDLOG_WARN("[UI_INPUT] peer_index_out_of_range idx={} count={}", p_idx, current_peers.size());
                 continue;
             }
             const std::string target_ip = current_peers[p_idx - 1].ip;
@@ -298,11 +365,30 @@ void RunInteractive(Network::Discovery& /*discovery*/, Network::Sender& sender, 
             
             receiver.Start(
                 [](const std::string& name, uint64_t size, const std::string&) {
+                    const auto wait_start = std::chrono::steady_clock::now();
+                    SPDLOG_INFO("[REQUEST_PROMPT] state=show file={} size={}", name, size);
                     SPDLOG_INFO("[UI_BLOCK] reason=stdin_wait_confirm");
                     std::cout << "\nIncoming: " << name << " (" << size << " bytes). Accept? (y/n): ";
-                    char c;
-                    std::cin >> c;
-                    return (c == 'y' || c == 'Y');
+                    std::cout << std::flush;
+                    std::string line;
+                    if (!std::getline(std::cin, line)) {
+                        std::cin.clear();
+                        SPDLOG_WARN("[REQUEST_PROMPT] state=input_error file={}", name);
+                        return false;
+                    }
+                    char c = '\0';
+                    for (char ch : line) {
+                        if (!std::isspace(static_cast<unsigned char>(ch))) {
+                            c = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+                            break;
+                        }
+                    }
+                    const bool accepted = (c == 'y');
+                    const auto wait_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - wait_start).count();
+                    SPDLOG_INFO("[REQUEST_PROMPT] state=decision file={} accepted={} wait_ms={} raw={}",
+                                name, accepted, wait_ms, line);
+                    return accepted;
                 },
                 [](uint64_t s, uint64_t t, double speed) {
                      std::cout << "\rReceiving: " << (s * 100 / t) << "% " << speed << " MB/s" << std::flush;

@@ -140,13 +140,20 @@ void Sender::SendFile(const std::string& filepath, ProgressCallback progress_cb,
             asio::write(socket_, asio::buffer(body));
 
             // 2. Wait Accept
+            SPDLOG_INFO("[WAIT_ACCEPT] state=begin file={}", filename);
+            const auto wait_accept_start = std::chrono::steady_clock::now();
             Protocol::Header resp_header;
             asio::read(socket_, asio::buffer(&resp_header, sizeof(resp_header)));
+            const auto wait_accept_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - wait_accept_start).count();
             if (resp_header.type != (uint16_t)Protocol::PacketType::Accept) {
+                SPDLOG_WARN("[WAIT_ACCEPT] state=end file={} result=rejected_or_invalid type={} wait_ms={}",
+                            filename, resp_header.type, wait_accept_ms);
                 SPDLOG_WARN("Transfer rejected");
                 if (done_cb) done_cb(false);
                 return;
             }
+            SPDLOG_INFO("[WAIT_ACCEPT] state=end file={} result=accepted wait_ms={}", filename, wait_accept_ms);
 
             // 3. Send Data Header
             header.type = (uint16_t)Protocol::PacketType::Data;
@@ -259,9 +266,14 @@ void Receiver::HandleSession() {
         
         // Callback to user
         bool accepted = true;
+        const auto prompt_wait_start = std::chrono::steady_clock::now();
+        SPDLOG_INFO("[WAIT_DECISION] state=begin file={} size={}", filename, filesize);
         if (request_cb_) {
             accepted = request_cb_(filename, filesize, "Unknown");
         }
+        const auto prompt_wait_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - prompt_wait_start).count();
+        SPDLOG_INFO("[WAIT_DECISION] state=end file={} accepted={} wait_ms={}", filename, accepted, prompt_wait_ms);
 
         if (!accepted) {
             Protocol::Header resp;
@@ -284,6 +296,7 @@ void Receiver::HandleSession() {
         resp.body_len = 0;
         resp.checksum = 0;
         asio::write(socket_, asio::buffer(&resp, sizeof(resp)));
+        SPDLOG_INFO("[ACCEPT_TX] file={}", filename);
 
         // 2. Read Data Header
         asio::read(socket_, asio::buffer(&header, sizeof(header)));
