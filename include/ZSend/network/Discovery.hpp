@@ -33,7 +33,7 @@ private:
     bool IsSelfIp(const std::string& ip) const;
     bool IsSelfPeer(const Peer& peer) const;
     std::unordered_set<std::string> CollectLocalIps() const;
-    std::vector<asio::ip::udp::endpoint> CollectBroadcastEndpoints() const;
+    std::vector<asio::ip::udp::endpoint> CollectBroadcastEndpoints(int port) const;
     void StartReceive();
     void HandleReceive(const std::error_code& error, std::size_t bytes_transferred);
     void BroadcastPresence();

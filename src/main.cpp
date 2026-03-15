@@ -29,7 +29,6 @@ using namespace ZSend;
 Config::AppConfig g_config;
 std::vector<Network::Peer> g_peers;
 std::mutex g_peers_mutex;
-constexpr uint16_t kServicePort = 53317;
 
 void SetupLogging() {
     std::filesystem::create_directories("log");
@@ -54,6 +53,8 @@ int main(int argc, char** argv) {
     // 1. Load Config
     g_config = Config::ConfigManager::Load();
     spdlog::info("Welcome, {}!", g_config.nickname);
+    const uint16_t service_port = g_config.service_port;
+    spdlog::info("Service port: {}", service_port);
 
     // 2. Setup Network Context
     asio::io_context ioc;
@@ -66,7 +67,7 @@ int main(int argc, char** argv) {
     std::unique_ptr<Network::Receiver> receiver;
 
     try {
-        discovery = std::make_unique<Network::Discovery>(ioc, kServicePort, g_config);
+        discovery = std::make_unique<Network::Discovery>(ioc, service_port, g_config);
         spdlog::info("Discovery initialized.");
         
         // Sender/Receiver (Receiver listens on TCP port 53317)
@@ -75,7 +76,7 @@ int main(int argc, char** argv) {
         spdlog::info("Sender initialized.");
 
         spdlog::info("Initializing Receiver...");
-        receiver = std::make_unique<Network::Receiver>(ioc, kServicePort, g_config.download_dir);
+        receiver = std::make_unique<Network::Receiver>(ioc, service_port, g_config.download_dir);
         spdlog::info("Receiver initialized.");
     } catch (const std::exception& e) {
         spdlog::critical("Initialization failed: {}", e.what());
@@ -138,7 +139,7 @@ int main(int argc, char** argv) {
                 std::promise<bool> done;
                 auto future = done.get_future();
                 
-                sender->Connect(target_ip, kServicePort, [&](bool success) {
+                sender->Connect(target_ip, service_port, [&](bool success) {
                     if (success) {
                         sender->SendFile(filepath, 
                             [](uint64_t s, uint64_t t, double speed) {
@@ -245,7 +246,7 @@ void RunInteractive(Network::Discovery& /*discovery*/, Network::Sender& sender, 
                 std::cin >> ip;
                 
                 std::atomic<bool> done{false};
-                sender.Connect(ip, kServicePort, [&](bool success) {
+                sender.Connect(ip, g_config.service_port, [&](bool success) {
                     if (success) {
                         sender.SendFile(path, 
                             [](uint64_t s, uint64_t t, double speed) {
@@ -281,7 +282,7 @@ void RunInteractive(Network::Discovery& /*discovery*/, Network::Sender& sender, 
                 }
                 
                 std::atomic<bool> done{false};
-                sender.Connect(target_ip, kServicePort, [&](bool success) {
+                sender.Connect(target_ip, g_config.service_port, [&](bool success) {
                     if (success) {
                         sender.SendFile(path, 
                             [](uint64_t s, uint64_t t, double speed) {

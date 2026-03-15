@@ -13,7 +13,7 @@ namespace Network {
 Discovery::Discovery(asio::io_context& ioc, int port, const Config::AppConfig& config)
     : ioc_(ioc), socket_(ioc, asio::ip::udp::endpoint(asio::ip::udp::v4(), port)),
       broadcast_timer_(ioc), config_(config), local_ips_(CollectLocalIps()),
-      broadcast_endpoints_(CollectBroadcastEndpoints()), running_(false), port_(port) {
+      broadcast_endpoints_(CollectBroadcastEndpoints(port)), running_(false), port_(port) {
     spdlog::info("Discovery constructor entered");
     try {
         socket_.set_option(asio::socket_base::broadcast(true));
@@ -94,7 +94,7 @@ std::unordered_set<std::string> Discovery::CollectLocalIps() const {
     return ips;
 }
 
-std::vector<asio::ip::udp::endpoint> Discovery::CollectBroadcastEndpoints() const {
+std::vector<asio::ip::udp::endpoint> Discovery::CollectBroadcastEndpoints(int port) const {
     std::vector<asio::ip::udp::endpoint> endpoints;
     std::unordered_set<uint32_t> seen;
 
@@ -113,16 +113,16 @@ std::vector<asio::ip::udp::endpoint> Discovery::CollectBroadcastEndpoints() cons
         auto broadcast_address = asio::ip::address_v4(bytes);
         auto numeric = broadcast_address.to_uint();
         if (seen.insert(numeric).second) {
-            endpoints.emplace_back(broadcast_address, static_cast<unsigned short>(port_));
+            endpoints.emplace_back(broadcast_address, static_cast<unsigned short>(port));
         }
     }
 
     if (seen.insert(asio::ip::address_v4::broadcast().to_uint()).second) {
-        endpoints.emplace_back(asio::ip::address_v4::broadcast(), static_cast<unsigned short>(port_));
+        endpoints.emplace_back(asio::ip::address_v4::broadcast(), static_cast<unsigned short>(port));
     }
 
     if (endpoints.empty()) {
-        endpoints.emplace_back(asio::ip::address_v4::broadcast(), static_cast<unsigned short>(port_));
+        endpoints.emplace_back(asio::ip::address_v4::broadcast(), static_cast<unsigned short>(port));
     }
 
     for (const auto& endpoint : endpoints) {
