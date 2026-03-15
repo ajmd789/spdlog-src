@@ -57,14 +57,33 @@ int main(int argc, char** argv) {
     
     // 3. Components
     // Discovery runs on UDP port 53317
-    Network::Discovery discovery(ioc, kServicePort, g_config);
-    
-    // Sender/Receiver (Receiver listens on TCP port 53317)
-    Network::Sender sender(ioc);
-    Network::Receiver receiver(ioc, kServicePort, g_config.download_dir);
+    spdlog::info("Initializing Discovery...");
+    std::unique_ptr<Network::Discovery> discovery;
+    std::unique_ptr<Network::Sender> sender;
+    std::unique_ptr<Network::Receiver> receiver;
+
+    try {
+        discovery = std::make_unique<Network::Discovery>(ioc, kServicePort, g_config);
+        spdlog::info("Discovery initialized.");
+        
+        // Sender/Receiver (Receiver listens on TCP port 53317)
+        spdlog::info("Initializing Sender...");
+        sender = std::make_unique<Network::Sender>(ioc);
+        spdlog::info("Sender initialized.");
+
+        spdlog::info("Initializing Receiver...");
+        receiver = std::make_unique<Network::Receiver>(ioc, kServicePort, g_config.download_dir);
+        spdlog::info("Receiver initialized.");
+    } catch (const std::exception& e) {
+        spdlog::critical("Initialization failed: {}", e.what());
+        return -1;
+    } catch (...) {
+        spdlog::critical("Initialization failed with unknown error");
+        return -1;
+    }
 
     // 4. Peer Discovery Callback
-    discovery.SetOnPeerFound([](const Network::Peer& peer) {
+    discovery->SetOnPeerFound([](const Network::Peer& peer) {
         std::lock_guard<std::mutex> lock(g_peers_mutex);
         bool found = false;
         for (auto& p : g_peers) {
@@ -86,7 +105,7 @@ int main(int argc, char** argv) {
     });
 
     // 5. Start Background Thread
-    discovery.Start();
+    discovery->Start();
     std::thread io_thread([&ioc]() { ioc.run(); });
 
     // 6. CLI
@@ -100,79 +119,85 @@ int main(int argc, char** argv) {
 
     auto recv_cmd = app.add_subcommand("recv", "Receive mode");
 
-    CLI11_PARSE(app, argc, argv);
+    int exit_code = 0;
+    try {
+        app.parse(argc, argv);
+    } catch (const CLI::ParseError& e) {
+        exit_code = app.exit(e);
+    }
 
-    if (send_cmd->parsed()) {
-        if (target_ip.empty()) {
-            spdlog::error("Target IP required for non-interactive mode");
-            return 1;
-        }
-        std::promise<bool> done;
-        auto future = done.get_future();
-        
-        sender.Connect(target_ip, kServicePort, [&](bool success) {
-            if (success) {
-                sender.SendFile(filepath, 
+    if (exit_code == 0) {
+        if (send_cmd->parsed()) {
+            if (target_ip.empty()) {
+                spdlog::error("Target IP required for non-interactive mode");
+                exit_code = 1;
+            } else {
+                std::promise<bool> done;
+                auto future = done.get_future();
+                
+                sender->Connect(target_ip, kServicePort, [&](bool success) {
+                    if (success) {
+                        sender->SendFile(filepath, 
+                            [](uint64_t s, uint64_t t, double speed) {
+                                 std::cout << "\rProgress: " << (s * 100 / t) << "% " << std::fixed << std::setprecision(1) << speed << " MB/s" << std::flush;
+                            },
+                            [&](bool success) {
+                                std::cout << std::endl;
+                                done.set_value(success);
+                            }
+                        );
+                    } else {
+                        done.set_value(false);
+                    }
+                });
+                
+                if (!future.get()) {
+                    spdlog::error("Transfer failed");
+                    exit_code = 1;
+                }
+            }
+            
+        } else if (recv_cmd->parsed()) {
+            std::cout << "Listening... Press Ctrl+C to exit.\n";
+            
+            std::atomic<bool> running{true};
+            
+            std::function<void()> start_listen;
+            start_listen = [&]() {
+                receiver->Start(
+                    [](const std::string& name, uint64_t size, const std::string& sender) {
+                        spdlog::info("Incoming: {} ({}) from {}", name, size, sender);
+                        return true;
+                    },
                     [](uint64_t s, uint64_t t, double speed) {
-                         std::cout << "\rProgress: " << (s * 100 / t) << "% " << std::fixed << std::setprecision(1) << speed << " MB/s" << std::flush;
+                         std::cout << "\rReceiving: " << (s * 100 / t) << "% " << std::fixed << std::setprecision(1) << speed << " MB/s" << std::flush;
                     },
                     [&](bool success) {
                         std::cout << std::endl;
-                        done.set_value(success);
+                        if (success) spdlog::info("Finished.");
+                        else spdlog::error("Failed.");
+                        if (running) start_listen();
                     }
                 );
-            } else {
-                done.set_value(false);
+            };
+            
+            start_listen();
+            
+            while(running) {
+                std::this_thread::sleep_for(std::chrono::seconds(1));
             }
-        });
-        
-        if (!future.get()) {
-            spdlog::error("Transfer failed");
+            
+        } else {
+            RunInteractive(*discovery, *sender, *receiver);
         }
-        
-    } else if (recv_cmd->parsed()) {
-        std::cout << "Listening... Press Ctrl+C to exit.\n";
-        
-        // Simple loop to restart receiver after completion
-        // Note: This is a hacky way to loop.
-        std::atomic<bool> running{true};
-        
-        std::function<void()> start_listen;
-        start_listen = [&]() {
-            receiver.Start(
-                [](const std::string& name, uint64_t size, const std::string& sender) {
-                    spdlog::info("Incoming: {} ({}) from {}", name, size, sender);
-                    return true; // Auto-accept
-                },
-                [](uint64_t s, uint64_t t, double speed) {
-                     std::cout << "\rReceiving: " << (s * 100 / t) << "% " << std::fixed << std::setprecision(1) << speed << " MB/s" << std::flush;
-                },
-                [&](bool success) {
-                    std::cout << std::endl;
-                    if (success) spdlog::info("Finished.");
-                    else spdlog::error("Failed.");
-                    if (running) start_listen(); // Restart
-                }
-            );
-        };
-        
-        start_listen();
-        
-        // Block main thread
-        while(running) {
-            std::this_thread::sleep_for(std::chrono::seconds(1));
-        }
-        
-    } else {
-        RunInteractive(discovery, sender, receiver);
     }
 
     // Cleanup
-    discovery.Stop();
+    discovery->Stop();
     ioc.stop();
     if (io_thread.joinable()) io_thread.join();
 
-    return 0;
+    return exit_code;
 }
 
 void RunInteractive(Network::Discovery& /*discovery*/, Network::Sender& sender, Network::Receiver& receiver) {

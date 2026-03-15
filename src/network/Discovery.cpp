@@ -13,7 +13,13 @@ namespace Network {
 Discovery::Discovery(asio::io_context& ioc, int port, const Config::AppConfig& config)
     : ioc_(ioc), socket_(ioc, asio::ip::udp::endpoint(asio::ip::udp::v4(), port)),
       broadcast_timer_(ioc), config_(config), local_ips_(CollectLocalIps()), running_(false), port_(port) {
-    socket_.set_option(asio::socket_base::broadcast(true));
+    spdlog::info("Discovery constructor entered");
+    try {
+        socket_.set_option(asio::socket_base::broadcast(true));
+    } catch (const std::exception& e) {
+        spdlog::error("Failed to set broadcast option: {}", e.what());
+    }
+    spdlog::info("Discovery constructor finished");
 }
 
 Discovery::~Discovery() {
@@ -65,6 +71,7 @@ bool Discovery::IsSelfPeer(const Peer& peer) const {
 // - 通过主机名解析补充本机网卡地址；
 // - 仅保留 IPv4，用于当前广播发现场景。
 std::unordered_set<std::string> Discovery::CollectLocalIps() const {
+    spdlog::info("Collecting local IPs...");
     std::unordered_set<std::string> ips;
     ips.insert("127.0.0.1");
 
