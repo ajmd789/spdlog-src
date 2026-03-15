@@ -12,7 +12,8 @@ namespace Network {
 // 3) 预采集本机 IPv4 地址集合，用于过滤“自己发给自己”的广播包。
 Discovery::Discovery(asio::io_context& ioc, int port, const Config::AppConfig& config)
     : ioc_(ioc), socket_(ioc, asio::ip::udp::endpoint(asio::ip::udp::v4(), port)),
-      broadcast_timer_(ioc), config_(config), local_ips_(CollectLocalIps()), running_(false), port_(port) {
+      broadcast_timer_(ioc), config_(config), local_ips_(CollectLocalIps()),
+      broadcast_endpoints_(CollectBroadcastEndpoints()), running_(false), port_(port) {
     spdlog::info("Discovery constructor entered");
     try {
         socket_.set_option(asio::socket_base::broadcast(true));
@@ -93,6 +94,44 @@ std::unordered_set<std::string> Discovery::CollectLocalIps() const {
     return ips;
 }
 
+std::vector<asio::ip::udp::endpoint> Discovery::CollectBroadcastEndpoints() const {
+    std::vector<asio::ip::udp::endpoint> endpoints;
+    std::unordered_set<uint32_t> seen;
+
+    for (const auto& ip : local_ips_) {
+        std::error_code ec;
+        auto address = asio::ip::make_address_v4(ip, ec);
+        if (ec) {
+            continue;
+        }
+        if (address.is_loopback()) {
+            continue;
+        }
+
+        auto bytes = address.to_bytes();
+        bytes[3] = 255;
+        auto broadcast_address = asio::ip::address_v4(bytes);
+        auto numeric = broadcast_address.to_uint();
+        if (seen.insert(numeric).second) {
+            endpoints.emplace_back(broadcast_address, static_cast<unsigned short>(port_));
+        }
+    }
+
+    if (seen.insert(asio::ip::address_v4::broadcast().to_uint()).second) {
+        endpoints.emplace_back(asio::ip::address_v4::broadcast(), static_cast<unsigned short>(port_));
+    }
+
+    if (endpoints.empty()) {
+        endpoints.emplace_back(asio::ip::address_v4::broadcast(), static_cast<unsigned short>(port_));
+    }
+
+    for (const auto& endpoint : endpoints) {
+        spdlog::info("Discovery broadcast target {}:{}", endpoint.address().to_string(), endpoint.port());
+    }
+
+    return endpoints;
+}
+
 // 挂起下一次异步接收，持续监听 UDP 广播包。
 void Discovery::StartReceive() {
     socket_.async_receive_from(
@@ -161,15 +200,14 @@ void Discovery::BroadcastPresence() {
     j["uuid"] = config_.device_id;
 
     auto data = j.dump();
-    // 广播到当前配置端口（当前项目默认 53317）。
-    auto endpoint = asio::ip::udp::endpoint(asio::ip::address_v4::broadcast(), port_);
-    spdlog::info("UDP send {}:{} {}", endpoint.address().to_string(), endpoint.port(), data);
-
-    socket_.async_send_to(
-        asio::buffer(data), endpoint,
-        [this, endpoint, data](const std::error_code& error, std::size_t bytes_transferred) {
-            HandleBroadcast(error, bytes_transferred, endpoint, data);
-        });
+    for (const auto& endpoint : broadcast_endpoints_) {
+        spdlog::info("UDP send {}:{} {}", endpoint.address().to_string(), endpoint.port(), data);
+        socket_.async_send_to(
+            asio::buffer(data), endpoint,
+            [this, endpoint, data](const std::error_code& error, std::size_t bytes_transferred) {
+                HandleBroadcast(error, bytes_transferred, endpoint, data);
+            });
+    }
 
     broadcast_timer_.expires_after(std::chrono::seconds(2));
     broadcast_timer_.async_wait([this](const std::error_code& error) {

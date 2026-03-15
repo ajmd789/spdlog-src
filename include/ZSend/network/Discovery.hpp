@@ -2,6 +2,7 @@
 #include <string>
 #include <functional>
 #include <unordered_set>
+#include <vector>
 #include <asio.hpp>
 #include <array>
 #include "ZSend/config/ConfigManager.hpp"
@@ -32,6 +33,7 @@ private:
     bool IsSelfIp(const std::string& ip) const;
     bool IsSelfPeer(const Peer& peer) const;
     std::unordered_set<std::string> CollectLocalIps() const;
+    std::vector<asio::ip::udp::endpoint> CollectBroadcastEndpoints() const;
     void StartReceive();
     void HandleReceive(const std::error_code& error, std::size_t bytes_transferred);
     void BroadcastPresence();
@@ -47,6 +49,7 @@ private:
     asio::steady_timer broadcast_timer_;
     Config::AppConfig config_;
     std::unordered_set<std::string> local_ips_;
+    std::vector<asio::ip::udp::endpoint> broadcast_endpoints_;
     PeerFoundCallback on_peer_found_;
     bool running_;
     int port_;
