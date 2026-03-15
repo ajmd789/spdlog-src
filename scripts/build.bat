@@ -4,6 +4,8 @@ set "SCRIPT_DIR=%~dp0"
 for %%I in ("%SCRIPT_DIR%..") do set "ROOT_DIR=%%~fI"
 set "BUILD_DIR=%ROOT_DIR%\build"
 if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%"
+taskkill /F /IM zsend.exe >nul 2>nul
+taskkill /F /IM zsend_tests.exe >nul 2>nul
 for /D %%D in ("%BUILD_DIR%\_deps\*-subbuild") do (
     if exist "%%D\CMakeCache.txt" del /Q "%%D\CMakeCache.txt"
 )
