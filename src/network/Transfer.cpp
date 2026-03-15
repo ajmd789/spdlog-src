@@ -3,11 +3,59 @@
 #include <iostream>
 #include <filesystem>
 #include <thread>
+#include <array>
+#include <chrono>
+#include <mutex>
+#include <unordered_map>
+#include <sstream>
+#include <iomanip>
 #include <spdlog/spdlog.h>
 #include <nlohmann/json.hpp>
 
 namespace ZSend {
 namespace Network {
+
+namespace {
+bool ShouldEmitKeyLog(const std::string& step, const std::string& filename) {
+    static std::mutex dedupe_mutex;
+    static std::unordered_map<std::string, std::chrono::steady_clock::time_point> last_emit;
+    const auto key = step + "|" + filename;
+    const auto now = std::chrono::steady_clock::now();
+    std::lock_guard<std::mutex> lock(dedupe_mutex);
+    auto it = last_emit.find(key);
+    if (it != last_emit.end() && (now - it->second) < std::chrono::seconds(10)) {
+        return false;
+    }
+    last_emit[key] = now;
+    return true;
+}
+
+std::string ComputeDebugHash(std::ifstream& file) {
+    constexpr uint64_t offset_basis = 1469598103934665603ULL;
+    constexpr uint64_t prime = 1099511628211ULL;
+    uint64_t hash = offset_basis;
+    std::array<char, 64 * 1024> buffer{};
+    auto original_pos = file.tellg();
+    file.clear();
+    file.seekg(0, std::ios::beg);
+    while (file.read(buffer.data(), buffer.size()) || file.gcount() > 0) {
+        const auto count = static_cast<size_t>(file.gcount());
+        for (size_t i = 0; i < count; ++i) {
+            hash ^= static_cast<uint8_t>(buffer[i]);
+            hash *= prime;
+        }
+    }
+    file.clear();
+    if (original_pos != std::ifstream::pos_type(-1)) {
+        file.seekg(original_pos);
+    } else {
+        file.seekg(0, std::ios::beg);
+    }
+    std::ostringstream oss;
+    oss << std::hex << std::setfill('0') << std::setw(16) << hash;
+    return oss.str();
+}
+}
 
 // --- Sender ---
 
@@ -16,13 +64,14 @@ Sender::Sender(asio::io_context& ioc) : socket_(ioc) {}
 void Sender::Connect(const std::string& ip, int port, std::function<void(bool success)> cb) {
     // Run in a thread to avoid blocking if called from main
     std::thread([this, ip, port, cb]() {
+        SPDLOG_INFO("[HEARTBEAT] sender-connect-thread-start");
         try {
             asio::ip::tcp::endpoint endpoint(asio::ip::make_address(ip), port);
             socket_.connect(endpoint);
             connected_ = true;
             if (cb) cb(true);
         } catch (const std::exception& e) {
-            spdlog::error("Connect failed: {}", e.what());
+            SPDLOG_ERROR("Connect failed: {}", e.what());
             if (cb) cb(false);
         }
     }).detach();
@@ -30,8 +79,9 @@ void Sender::Connect(const std::string& ip, int port, std::function<void(bool su
 
 void Sender::SendFile(const std::string& filepath, ProgressCallback progress_cb, std::function<void(bool success)> done_cb) {
     std::thread([this, filepath, progress_cb, done_cb]() {
+        SPDLOG_INFO("[HEARTBEAT] sender-send-thread-start");
         if (!connected_) {
-            spdlog::error("Not connected");
+            SPDLOG_ERROR("Not connected");
             if (done_cb) done_cb(false);
             return;
         }
@@ -39,7 +89,7 @@ void Sender::SendFile(const std::string& filepath, ProgressCallback progress_cb,
         try {
             std::ifstream file(filepath, std::ios::binary | std::ios::ate);
             if (!file) {
-                spdlog::error("Cannot open file: {}", filepath);
+                SPDLOG_ERROR("Cannot open file: {}", filepath);
                 if (done_cb) done_cb(false);
                 return;
             }
@@ -48,6 +98,29 @@ void Sender::SendFile(const std::string& filepath, ProgressCallback progress_cb,
             file.seekg(0, std::ios::beg);
             
             std::string filename = std::filesystem::path(filepath).filename().string();
+            const auto hash_hex = ComputeDebugHash(file);
+            file.seekg(0, std::ios::beg);
+
+            asio::ip::tcp::endpoint peer_endpoint;
+            std::error_code peer_ec;
+            peer_endpoint = socket_.remote_endpoint(peer_ec);
+            if (!peer_ec) {
+                SPDLOG_INFO("[PROPOSAL] target={}:{} file={} size={} hash={}",
+                            peer_endpoint.address().to_string(),
+                            peer_endpoint.port(),
+                            filename,
+                            filesize,
+                            hash_hex);
+            } else {
+                SPDLOG_INFO("[PROPOSAL] target=<unknown> file={} size={} hash={}",
+                            filename,
+                            filesize,
+                            hash_hex);
+            }
+
+            if (ShouldEmitKeyLog("SEND_START", filename)) {
+                SPDLOG_INFO("[SEND_START] file={} size={}", filename, filesize);
+            }
 
             // 1. Handshake
             nlohmann::json handshake;
@@ -62,6 +135,7 @@ void Sender::SendFile(const std::string& filepath, ProgressCallback progress_cb,
             header.body_len = body.size();
             header.checksum = 0; // TODO
 
+            SPDLOG_DEBUG("Sending handshake for {}", filename);
             asio::write(socket_, asio::buffer(&header, sizeof(header)));
             asio::write(socket_, asio::buffer(body));
 
@@ -69,7 +143,7 @@ void Sender::SendFile(const std::string& filepath, ProgressCallback progress_cb,
             Protocol::Header resp_header;
             asio::read(socket_, asio::buffer(&resp_header, sizeof(resp_header)));
             if (resp_header.type != (uint16_t)Protocol::PacketType::Accept) {
-                spdlog::warn("Transfer rejected");
+                SPDLOG_WARN("Transfer rejected");
                 if (done_cb) done_cb(false);
                 return;
             }
@@ -105,15 +179,17 @@ void Sender::SendFile(const std::string& filepath, ProgressCallback progress_cb,
             // 5. Wait Ack
             asio::read(socket_, asio::buffer(&resp_header, sizeof(resp_header)));
             if (resp_header.type == (uint16_t)Protocol::PacketType::Ack) {
-                spdlog::info("Transfer complete!");
+                if (ShouldEmitKeyLog("SEND_DONE", filename)) {
+                    SPDLOG_INFO("[SEND_DONE] file={} size={}", filename, filesize);
+                }
                 if (done_cb) done_cb(true);
             } else {
-                spdlog::error("Transfer failed (No Ack)");
+                SPDLOG_ERROR("Transfer failed (No Ack)");
                 if (done_cb) done_cb(false);
             }
 
         } catch (const std::exception& e) {
-            spdlog::error("SendFile exception: {}", e.what());
+            SPDLOG_ERROR("SendFile exception: {}", e.what());
             if (done_cb) done_cb(false);
         }
     }).detach();
@@ -142,10 +218,11 @@ void Receiver::DoAccept() {
             // Note: socket_ is a member, so we can't move it easily if we want to accept more?
             // For MVP one transfer at a time is fine.
             std::thread([this]() {
+                SPDLOG_INFO("[HEARTBEAT] receiver-session-thread-start");
                 HandleSession();
             }).detach();
         } else {
-            spdlog::error("Accept failed: {}", error.message());
+            SPDLOG_ERROR("Accept failed: {}", error.message());
         }
     });
 }
@@ -165,6 +242,20 @@ void Receiver::HandleSession() {
         auto j = nlohmann::json::parse(body);
         std::string filename = j["filename"];
         uint64_t filesize = j["filesize"];
+        std::error_code remote_ec;
+        auto remote_endpoint = socket_.remote_endpoint(remote_ec);
+        if (!remote_ec) {
+            SPDLOG_INFO("[PROPOSAL_RX] from={}:{} file={} size={}",
+                        remote_endpoint.address().to_string(),
+                        remote_endpoint.port(),
+                        filename,
+                        filesize);
+        } else {
+            SPDLOG_INFO("[PROPOSAL_RX] from=<unknown> file={} size={}", filename, filesize);
+        }
+        if (ShouldEmitKeyLog("RECV_START", filename)) {
+            SPDLOG_INFO("[RECV_START] file={} size={}", filename, filesize);
+        }
         
         // Callback to user
         bool accepted = true;
@@ -180,6 +271,7 @@ void Receiver::HandleSession() {
             resp.body_len = 0;
             resp.checksum = 0;
             asio::write(socket_, asio::buffer(&resp, sizeof(resp)));
+            SPDLOG_DEBUG("Receiver rejected {}", filename);
             if (done_cb_) done_cb_(false);
             return;
         }
@@ -226,11 +318,14 @@ void Receiver::HandleSession() {
         // 4. Send Ack
         resp.type = (uint16_t)Protocol::PacketType::Ack;
         asio::write(socket_, asio::buffer(&resp, sizeof(resp)));
+        if (ShouldEmitKeyLog("RECV_DONE", filename)) {
+            SPDLOG_INFO("[RECV_DONE] file={} size={}", filename, total);
+        }
         
         if (done_cb_) done_cb_(true);
 
     } catch (const std::exception& e) {
-        spdlog::error("Receiver exception: {}", e.what());
+        SPDLOG_ERROR("Receiver exception: {}", e.what());
         if (done_cb_) done_cb_(false);
     }
 }

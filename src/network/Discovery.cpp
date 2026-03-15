@@ -14,13 +14,13 @@ Discovery::Discovery(asio::io_context& ioc, int port, const Config::AppConfig& c
     : ioc_(ioc), socket_(ioc, asio::ip::udp::endpoint(asio::ip::udp::v4(), port)),
       broadcast_timer_(ioc), config_(config), local_ips_(CollectLocalIps()),
       broadcast_endpoints_(CollectBroadcastEndpoints(port)), running_(false), port_(port) {
-    spdlog::info("Discovery constructor entered");
+    SPDLOG_INFO("Discovery constructor entered");
     try {
         socket_.set_option(asio::socket_base::broadcast(true));
     } catch (const std::exception& e) {
-        spdlog::error("Failed to set broadcast option: {}", e.what());
+        SPDLOG_ERROR("Failed to set broadcast option: {}", e.what());
     }
-    spdlog::info("Discovery constructor finished");
+    SPDLOG_INFO("Discovery constructor finished");
 }
 
 Discovery::~Discovery() {
@@ -34,7 +34,7 @@ Discovery::~Discovery() {
 void Discovery::Start() {
     if (running_) return;
     running_ = true;
-    spdlog::info("Discovery started (udp:{})", port_);
+    SPDLOG_INFO("Discovery started (udp:{})", port_);
     StartReceive();
     BroadcastPresence();
 }
@@ -72,7 +72,7 @@ bool Discovery::IsSelfPeer(const Peer& peer) const {
 // - 通过主机名解析补充本机网卡地址；
 // - 仅保留 IPv4，用于当前广播发现场景。
 std::unordered_set<std::string> Discovery::CollectLocalIps() const {
-    spdlog::info("Collecting local IPs...");
+    SPDLOG_INFO("Collecting local IPs...");
     std::unordered_set<std::string> ips;
     ips.insert("127.0.0.1");
 
@@ -126,7 +126,7 @@ std::vector<asio::ip::udp::endpoint> Discovery::CollectBroadcastEndpoints(int po
     }
 
     for (const auto& endpoint : endpoints) {
-        spdlog::info("Discovery broadcast target {}:{}", endpoint.address().to_string(), endpoint.port());
+        SPDLOG_INFO("Discovery broadcast target {}:{}", endpoint.address().to_string(), endpoint.port());
     }
 
     return endpoints;
@@ -154,7 +154,11 @@ void Discovery::HandleReceive(const std::error_code& error, std::size_t bytes_tr
     if (!error) {
         try {
             std::string data(recv_buffer_.data(), bytes_transferred);
-            spdlog::info("UDP recv {}:{} {}", sender_endpoint_.address().to_string(), sender_endpoint_.port(), data);
+            SPDLOG_INFO("UDP recv bytes={} from={}:{} payload={}",
+                        bytes_transferred,
+                        sender_endpoint_.address().to_string(),
+                        sender_endpoint_.port(),
+                        data);
             auto j = nlohmann::json::parse(data);
             
             // 协议基础校验：必须是 ZSend 的发现报文。
@@ -201,7 +205,7 @@ void Discovery::BroadcastPresence() {
 
     auto data = j.dump();
     for (const auto& endpoint : broadcast_endpoints_) {
-        spdlog::info("UDP send {}:{} {}", endpoint.address().to_string(), endpoint.port(), data);
+        SPDLOG_INFO("UDP send {}:{} {}", endpoint.address().to_string(), endpoint.port(), data);
         socket_.async_send_to(
             asio::buffer(data), endpoint,
             [this, endpoint, data](const std::error_code& error, std::size_t bytes_transferred) {
@@ -221,10 +225,10 @@ void Discovery::HandleBroadcast(const std::error_code& error,
                                 const asio::ip::udp::endpoint& endpoint,
                                 const std::string& data) {
     if (error && error != asio::error::operation_aborted) {
-        spdlog::warn("Broadcast failed {}:{} {} {}", endpoint.address().to_string(), endpoint.port(), error.message(), data);
+        SPDLOG_WARN("Broadcast failed {}:{} {} {}", endpoint.address().to_string(), endpoint.port(), error.message(), data);
         return;
     }
-    spdlog::info("Broadcast ok {}:{} {} {}", endpoint.address().to_string(), endpoint.port(), bytes_transferred, data);
+    SPDLOG_INFO("Broadcast ok {}:{} {} {}", endpoint.address().to_string(), endpoint.port(), bytes_transferred, data);
 }
 
 } // namespace Network

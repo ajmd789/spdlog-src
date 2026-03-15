@@ -161,6 +161,11 @@ target_link_libraries(zsend PRIVATE
     asio::asio
 )
 
+target_compile_definitions(zsend PRIVATE SPDLOG_ACTIVE_LEVEL=SPDLOG_LEVEL_INFO)
+if(ENABLE_ASAN)
+    target_compile_definitions(zsend PRIVATE ZSEND_ASAN_ENABLED=1)
+endif()
+
 # Link ws2_32 on Windows for asio
 if(WIN32)
     target_link_libraries(zsend PRIVATE ws2_32 mswsock)
@@ -193,6 +198,10 @@ if(BUILD_TESTING)
         spdlog::spdlog
         asio::asio
     )
+    target_compile_definitions(zsend_tests PRIVATE SPDLOG_ACTIVE_LEVEL=SPDLOG_LEVEL_INFO)
+    if(ENABLE_ASAN)
+        target_compile_definitions(zsend_tests PRIVATE ZSEND_ASAN_ENABLED=1)
+    endif()
     if(WIN32)
         target_link_libraries(zsend_tests PRIVATE ws2_32 mswsock)
     endif()

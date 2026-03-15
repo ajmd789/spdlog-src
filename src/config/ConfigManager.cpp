@@ -56,7 +56,7 @@ AppConfig ConfigManager::Load() {
                 need_save = true;
             }
         } catch (const std::exception& e) {
-            spdlog::error("Failed to load config: {}", e.what());
+            SPDLOG_ERROR("Failed to load config: {}", e.what());
         }
     }
 
@@ -98,7 +98,7 @@ void ConfigManager::Save(const AppConfig& config) {
         std::ofstream f(GetConfigPath());
         f << j.dump(4);
     } catch (const std::exception& e) {
-        spdlog::error("Failed to save config: {}", e.what());
+        SPDLOG_ERROR("Failed to save config: {}", e.what());
     }
 }
 

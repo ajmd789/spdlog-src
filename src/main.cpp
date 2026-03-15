@@ -8,9 +8,13 @@
 #include <future>
 #include <clocale>
 #include <filesystem>
+#include <memory>
+#include <cstdlib>
 
 #include <spdlog/spdlog.h>
+#include <spdlog/logger.h>
 #include <spdlog/sinks/basic_file_sink.h>
+#include <spdlog/sinks/stdout_color_sinks.h>
 #include <CLI/CLI.hpp>
 #include <asio.hpp>
 
@@ -32,9 +36,21 @@ std::mutex g_peers_mutex;
 
 void SetupLogging() {
     std::filesystem::create_directories("log");
-    auto file_logger = spdlog::basic_logger_mt("file_logger", "log/zesnd.log", true);
-    spdlog::set_default_logger(file_logger);
-    spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%l] %v");
+    std::vector<spdlog::sink_ptr> sinks;
+    auto stderr_sink = std::make_shared<spdlog::sinks::stderr_color_sink_mt>();
+    sinks.push_back(stderr_sink);
+    auto file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>("log/zesnd.log", true);
+    sinks.push_back(file_sink);
+#if defined(__APPLE__) && defined(ZSEND_ASAN_ENABLED)
+    const char* user = std::getenv("USER");
+    const std::string username = (user != nullptr && user[0] != '\0') ? user : "unknown";
+    auto tmp_file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>("/tmp/zsend_" + username + ".log", true);
+    sinks.push_back(tmp_file_sink);
+#endif
+    auto logger = std::make_shared<spdlog::logger>("zsend", sinks.begin(), sinks.end());
+    spdlog::set_default_logger(logger);
+    spdlog::set_level(spdlog::level::info);
+    spdlog::set_pattern("%Y-%m-%dT%H:%M:%S.%e %^%l%$ %t %@ %v");
     spdlog::flush_on(spdlog::level::info);
 }
 
@@ -49,40 +65,41 @@ int main(int argc, char** argv) {
 #endif
 
     SetupLogging();
+    SPDLOG_INFO("[HEARTBEAT] main-start");
 
     // 1. Load Config
     g_config = Config::ConfigManager::Load();
-    spdlog::info("Welcome, {}!", g_config.nickname);
+    SPDLOG_INFO("Welcome, {}!", g_config.nickname);
     const uint16_t service_port = g_config.service_port;
-    spdlog::info("Service port: {}", service_port);
+    SPDLOG_INFO("Service port: {}", service_port);
 
     // 2. Setup Network Context
     asio::io_context ioc;
     
     // 3. Components
     // Discovery runs on UDP port 53317
-    spdlog::info("Initializing Discovery...");
+    SPDLOG_DEBUG("Initializing Discovery...");
     std::unique_ptr<Network::Discovery> discovery;
     std::unique_ptr<Network::Sender> sender;
     std::unique_ptr<Network::Receiver> receiver;
 
     try {
         discovery = std::make_unique<Network::Discovery>(ioc, service_port, g_config);
-        spdlog::info("Discovery initialized.");
+        SPDLOG_DEBUG("Discovery initialized.");
         
         // Sender/Receiver (Receiver listens on TCP port 53317)
-        spdlog::info("Initializing Sender...");
+        SPDLOG_DEBUG("Initializing Sender...");
         sender = std::make_unique<Network::Sender>(ioc);
-        spdlog::info("Sender initialized.");
+        SPDLOG_DEBUG("Sender initialized.");
 
-        spdlog::info("Initializing Receiver...");
+        SPDLOG_DEBUG("Initializing Receiver...");
         receiver = std::make_unique<Network::Receiver>(ioc, service_port, g_config.download_dir);
-        spdlog::info("Receiver initialized.");
+        SPDLOG_DEBUG("Receiver initialized.");
     } catch (const std::exception& e) {
-        spdlog::critical("Initialization failed: {}", e.what());
+        SPDLOG_CRITICAL("Initialization failed: {}", e.what());
         return -1;
     } catch (...) {
-        spdlog::critical("Initialization failed with unknown error");
+        SPDLOG_CRITICAL("Initialization failed with unknown error");
         return -1;
     }
 
@@ -110,7 +127,10 @@ int main(int argc, char** argv) {
 
     // 5. Start Background Thread
     discovery->Start();
-    std::thread io_thread([&ioc]() { ioc.run(); });
+    std::thread io_thread([&ioc]() {
+        SPDLOG_INFO("[HEARTBEAT] io-thread-start");
+        ioc.run();
+    });
 
     // 6. CLI
     CLI::App app{"ZSend - LAN File Transfer"};
@@ -133,7 +153,7 @@ int main(int argc, char** argv) {
     if (exit_code == 0) {
         if (send_cmd->parsed()) {
             if (target_ip.empty()) {
-                spdlog::error("Target IP required for non-interactive mode");
+                SPDLOG_ERROR("Target IP required for non-interactive mode");
                 exit_code = 1;
             } else {
                 std::promise<bool> done;
@@ -154,9 +174,10 @@ int main(int argc, char** argv) {
                         done.set_value(false);
                     }
                 });
-                
+
+                SPDLOG_INFO("[UI_BLOCK] reason=future_wait_send_done");
                 if (!future.get()) {
-                    spdlog::error("Transfer failed");
+                    SPDLOG_ERROR("Transfer failed");
                     exit_code = 1;
                 }
             }
@@ -170,7 +191,7 @@ int main(int argc, char** argv) {
             start_listen = [&]() {
                 receiver->Start(
                     [](const std::string& name, uint64_t size, const std::string& sender) {
-                        spdlog::info("Incoming: {} ({}) from {}", name, size, sender);
+                        SPDLOG_DEBUG("Incoming: {} ({}) from {}", name, size, sender);
                         return true;
                     },
                     [](uint64_t s, uint64_t t, double speed) {
@@ -178,8 +199,8 @@ int main(int argc, char** argv) {
                     },
                     [&](bool success) {
                         std::cout << std::endl;
-                        if (success) spdlog::info("Finished.");
-                        else spdlog::error("Failed.");
+                        if (success) SPDLOG_DEBUG("Finished.");
+                        else SPDLOG_ERROR("Failed.");
                         if (running) start_listen();
                     }
                 );
@@ -187,6 +208,7 @@ int main(int argc, char** argv) {
             
             start_listen();
             
+            SPDLOG_INFO("[UI_BLOCK] reason=recv_loop_wait");
             while(running) {
                 std::this_thread::sleep_for(std::chrono::seconds(1));
             }
@@ -260,6 +282,7 @@ void RunInteractive(Network::Discovery& /*discovery*/, Network::Sender& sender, 
                     }
                 });
                 
+                SPDLOG_INFO("[UI_BLOCK] reason=wait_send_done");
                 while (!done) std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 std::cout << "\nDone.\n";
                 
@@ -296,6 +319,7 @@ void RunInteractive(Network::Discovery& /*discovery*/, Network::Sender& sender, 
                     }
                 });
                 
+                SPDLOG_INFO("[UI_BLOCK] reason=wait_send_done");
                 while (!done) std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 std::cout << "\nDone.\n";
             }
@@ -306,6 +330,7 @@ void RunInteractive(Network::Discovery& /*discovery*/, Network::Sender& sender, 
             
             receiver.Start(
                 [](const std::string& name, uint64_t size, const std::string&) {
+                    SPDLOG_INFO("[UI_BLOCK] reason=stdin_wait_confirm");
                     std::cout << "\nIncoming: " << name << " (" << size << " bytes). Accept? (y/n): ";
                     char c;
                     std::cin >> c;
@@ -319,6 +344,7 @@ void RunInteractive(Network::Discovery& /*discovery*/, Network::Sender& sender, 
                 }
             );
             
+            SPDLOG_INFO("[UI_BLOCK] reason=wait_receive_done");
             while (!done) {
                 // How to interrupt? 
                 // receiver.Cancel() can be called from another thread.
