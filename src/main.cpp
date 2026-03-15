@@ -14,7 +14,6 @@
 #include <spdlog/spdlog.h>
 #include <spdlog/logger.h>
 #include <spdlog/sinks/basic_file_sink.h>
-#include <spdlog/sinks/stdout_color_sinks.h>
 #include <CLI/CLI.hpp>
 #include <asio.hpp>
 
@@ -37,8 +36,6 @@ std::mutex g_peers_mutex;
 void SetupLogging() {
     std::filesystem::create_directories("log");
     std::vector<spdlog::sink_ptr> sinks;
-    auto stderr_sink = std::make_shared<spdlog::sinks::stderr_color_sink_mt>();
-    sinks.push_back(stderr_sink);
     auto file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>("log/zesnd.log", true);
     sinks.push_back(file_sink);
 #if defined(__APPLE__) && defined(ZSEND_ASAN_ENABLED)
@@ -190,8 +187,7 @@ int main(int argc, char** argv) {
             std::function<void()> start_listen;
             start_listen = [&]() {
                 receiver->Start(
-                    [](const std::string& name, uint64_t size, const std::string& sender) {
-                        SPDLOG_DEBUG("Incoming: {} ({}) from {}", name, size, sender);
+                    [](const std::string&, uint64_t, const std::string&) {
                         return true;
                     },
                     [](uint64_t s, uint64_t t, double speed) {
@@ -249,80 +245,52 @@ void RunInteractive(Network::Discovery& /*discovery*/, Network::Sender& sender, 
             std::cout << "Enter file path: ";
             std::cin >> path;
             
-            // Show peers
             std::vector<Network::Peer> current_peers;
-            {
-                std::lock_guard<std::mutex> lock(g_peers_mutex);
-                current_peers = g_peers;
+            while (true) {
+                {
+                    std::lock_guard<std::mutex> lock(g_peers_mutex);
+                    current_peers = g_peers;
+                }
+                if (!current_peers.empty()) {
+                    break;
+                }
+                SPDLOG_INFO("[UI_BLOCK] reason=wait_peer_discovery");
+                std::cout << "\rSearching receivers on LAN..." << std::flush;
+                std::this_thread::sleep_for(std::chrono::seconds(1));
             }
+            std::cout << "\rSearching receivers on LAN...found.      \n";
 
-            if (current_peers.empty()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(2200));
-                std::lock_guard<std::mutex> lock(g_peers_mutex);
-                current_peers = g_peers;
+            std::cout << "Select peer:\n";
+            for (size_t i = 0; i < current_peers.size(); ++i) {
+                std::cout << (i + 1) << ". " << current_peers[i].nickname << " (" << current_peers[i].ip << ")\n";
             }
             
-            if (current_peers.empty()) {
-                std::cout << "No peers found. Enter IP manually: ";
-                std::string ip;
-                std::cin >> ip;
-                
-                std::atomic<bool> done{false};
-                sender.Connect(ip, g_config.service_port, [&](bool success) {
-                    if (success) {
-                        sender.SendFile(path, 
-                            [](uint64_t s, uint64_t t, double speed) {
-                                std::cout << "\rProgress: " << (s * 100 / t) << "% " << speed << " MB/s" << std::flush;
-                            },
-                            [&](bool) { done = true; }
-                        );
-                    } else {
-                        std::cout << "Connect failed\n";
-                        done = true;
-                    }
-                });
-                
-                SPDLOG_INFO("[UI_BLOCK] reason=wait_send_done");
-                while (!done) std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                std::cout << "\nDone.\n";
-                
-            } else {
-                std::cout << "Select peer:\n";
-                for (size_t i = 0; i < current_peers.size(); ++i) {
-                    std::cout << (i + 1) << ". " << current_peers[i].nickname << " (" << current_peers[i].ip << ")\n";
-                }
-                std::cout << (current_peers.size() + 1) << ". Manual IP\n";
-                
-                int p_idx;
-                std::cin >> p_idx;
-                std::string target_ip;
-                
-                if (p_idx > 0 && p_idx <= (int)current_peers.size()) {
-                    target_ip = current_peers[p_idx - 1].ip;
-                } else {
-                    std::cout << "Enter IP: ";
-                    std::cin >> target_ip;
-                }
-                
-                std::atomic<bool> done{false};
-                sender.Connect(target_ip, g_config.service_port, [&](bool success) {
-                    if (success) {
-                        sender.SendFile(path, 
-                            [](uint64_t s, uint64_t t, double speed) {
-                                std::cout << "\rProgress: " << (s * 100 / t) << "% " << speed << " MB/s" << std::flush;
-                            },
-                            [&](bool) { done = true; }
-                        );
-                    } else {
-                        std::cout << "Connect failed\n";
-                        done = true;
-                    }
-                });
-                
-                SPDLOG_INFO("[UI_BLOCK] reason=wait_send_done");
-                while (!done) std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                std::cout << "\nDone.\n";
+            int p_idx;
+            std::cin >> p_idx;
+            if (p_idx <= 0 || p_idx > (int)current_peers.size()) {
+                std::cout << "Invalid peer index.\n";
+                continue;
             }
+            const std::string target_ip = current_peers[p_idx - 1].ip;
+            
+            std::atomic<bool> done{false};
+            sender.Connect(target_ip, g_config.service_port, [&](bool success) {
+                if (success) {
+                    sender.SendFile(path, 
+                        [](uint64_t s, uint64_t t, double speed) {
+                            std::cout << "\rProgress: " << (s * 100 / t) << "% " << speed << " MB/s" << std::flush;
+                        },
+                        [&](bool) { done = true; }
+                    );
+                } else {
+                    std::cout << "Connect failed\n";
+                    done = true;
+                }
+            });
+            
+            SPDLOG_INFO("[UI_BLOCK] reason=wait_send_done");
+            while (!done) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            std::cout << "\nDone.\n";
             
         } else if (choice == 2) { // Receive
             std::cout << "Listening... (Press Enter to stop)\n";
