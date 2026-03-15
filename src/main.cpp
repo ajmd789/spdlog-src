@@ -7,9 +7,10 @@
 #include <mutex>
 #include <future>
 #include <clocale>
+#include <filesystem>
 
 #include <spdlog/spdlog.h>
-#include <spdlog/sinks/stdout_color_sinks.h>
+#include <spdlog/sinks/basic_file_sink.h>
 #include <CLI/CLI.hpp>
 #include <asio.hpp>
 
@@ -31,9 +32,11 @@ std::mutex g_peers_mutex;
 constexpr uint16_t kServicePort = 53317;
 
 void SetupLogging() {
-    auto console = spdlog::stdout_color_mt("console");
-    spdlog::set_default_logger(console);
-    spdlog::set_pattern("[%H:%M:%S] [%^%l%$] %v");
+    std::filesystem::create_directories("log");
+    auto file_logger = spdlog::basic_logger_mt("file_logger", "log/zesnd.log", true);
+    spdlog::set_default_logger(file_logger);
+    spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%l] %v");
+    spdlog::flush_on(spdlog::level::info);
 }
 
 void RunInteractive(Network::Discovery& /*discovery*/, Network::Sender& sender, Network::Receiver& receiver);
